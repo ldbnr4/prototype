@@ -1,13 +1,14 @@
 import base64
 import json
 import logging
-from common.gcf_household_income import upload_household_income
+from common.census import upload_household_income, upload_state_names
+from common.pubsub_publisher import notify_data_ingested
 from common.di_url_file_to_gcs import url_file_to_gcs
-
 
 # Data source name literals. These correspond to a specific data ingestion workflow.
 _HOUSEHOLD_INCOME = 'HOUSEHOLD_INCOME'
 _URGENT_CARE_FACILITIES = 'URGENT_CARE_FACILITIES'
+_STATE_NAMES = 'STATE_NAMES'
 
 
 def ingest_data(event, context):
@@ -33,9 +34,18 @@ def ingest_data(event, context):
     logging.error("Pubsub data must contain fields 'url', 'gcs_bucket', and 'filename'")
     return
   
-  if event_dict['id'] == _HOUSEHOLD_INCOME:
-    upload_household_income(event_dict['url'], event_dict['gcs_bucket'], event_dict['filename'])
-  if event_dict['id'] == _URGENT_CARE_FACILITIES:
-    url_file_to_gcs(event_dict['url'], None, event_dict['gcs_bucket'], event_dict['filename'])
+  id = event_dict['id']
+  url = event_dict['url']
+  gcs_bucket = event_dict['gcs_bucket']
+  filename = event_dict['filename']
+
+  if id == _HOUSEHOLD_INCOME:
+    upload_household_income(url, gcs_bucket, filename)
+  elif id == _STATE_NAMES:
+    upload_state_names(url, gcs_bucket, filename)
+  elif id == _URGENT_CARE_FACILITIES:
+    url_file_to_gcs(url, None, gcs_bucket, filename)
   else: 
-    logging.warning("Valid id not provided")
+    logging.warning("ID: %s, is not a valid id", id)
+
+  notify_data_ingested(id, gcs_bucket, filename)
