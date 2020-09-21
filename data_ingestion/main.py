@@ -2,10 +2,12 @@ import base64
 import json
 import logging
 from common.gcf_household_income import upload_household_income
+from common.di_url_file_to_gcs import url_file_to_gcs
 
 
 # Data source name literals. These correspond to a specific data ingestion workflow.
 _HOUSEHOLD_INCOME = 'HOUSEHOLD_INCOME'
+_URGENT_CARE_FACILITIES = 'URGENT_CARE_FACILITIES'
 
 
 def ingest_data(event, context):
@@ -30,5 +32,10 @@ def ingest_data(event, context):
   if 'url' not in event_dict or 'gcs_bucket' not in event_dict or 'filename' not in event_dict:
     logging.error("Pubsub data must contain fields 'url', 'gcs_bucket', and 'filename'")
     return
+  
   if event_dict['id'] == _HOUSEHOLD_INCOME:
     upload_household_income(event_dict['url'], event_dict['gcs_bucket'], event_dict['filename'])
+  if event_dict['id'] == _URGENT_CARE_FACILITIES:
+    url_file_to_gcs(event_dict['url'], None, event_dict['gcs_bucket'], event_dict['filename'])
+  else: 
+    logging.warning("Valid id not provided")
