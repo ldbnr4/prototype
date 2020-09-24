@@ -48,6 +48,14 @@ During development you can also just run `pip install new_dep`, but remember to 
 ## Python environment setup
 TODO instructions for us all to be on the same python virtual environment setup.
 
+## Building a Cloud Run image manually
+
+Run `gcloud builds submit --tag gcr.io/{PROJECT_ID}/{YOUR_IMAGE_NAME}` from the directory which contains the Dockerfile for the service
+
+Then set the service's image path variable in the terraform configuration to the tag. 
+
+TODO: Local docker build instructions
+
 ## Cloud Run local testing with an emulator
 
 The [Cloud Code](https://cloud.google.com/code) plugin for
@@ -83,3 +91,4 @@ After your Docker container successfully builds and is running locally you can s
 1. [Create a service account in Pantheon](https://cloud.google.com/docs/authentication/getting-started)
 2. Using IAM, grant the appropriate permissions to the service account
 3. Inside the `launch.json` file, set the `configuration->service->serviceAccountName` attribute to the service account email you just created.
+
