@@ -154,22 +154,30 @@ resource "google_bigquery_job" "bq_job_pdccr_ucf_joined" {
  */
 
 /*
- * [BEGIN] GCF upload to GCS Setup
+ * [BEGIN] GCF code upload Setup
  */
 
-# Create a ZIP of the data_ingestion folder.
-data "archive_file" "upload_to_gcs_zip" {
+# Create a ZIP of the /python folder.
+data "archive_file" "gcf_ingestion_zip" {
   type        = "zip"
-  source_dir  = "${var.gcf_code_path}/data_ingestion/"
-  output_path = "${var.gcf_code_path}/upload_to_gcs.zip"
+  source_dir  = "${var.gcf_code_path}/python/"
+  output_path = "${var.gcf_code_path}/gcf_ingestion.zip"
 }
 
 # Place the ZIP file into the gcf_code bucket
-resource "google_storage_bucket_object" "upload_to_gcs_code" {
-  name   = "upload_to_gcs.zip"
+resource "google_storage_bucket_object" "gcf_ingestion_code" {
+  name   = "gcf_ingestion.zip"
   bucket = google_storage_bucket.gcf_code.name
-  source = data.archive_file.upload_to_gcs_zip.output_path
+  source = data.archive_file.gcf_ingestion_zip.output_path
 }
+
+/*
+ * [END] GCF code upload Setup
+ */
+
+/*
+ * [BEGIN] GCF upload to GCS Setup
+ */
 
 # Configure the actual Cloud Function for uploading data to GCS
 resource "google_cloudfunctions_function" "data_ingestion_to_gcs" {
@@ -177,7 +185,7 @@ resource "google_cloudfunctions_function" "data_ingestion_to_gcs" {
   description           = "Downloads data files from the internet and uploads to a GCS bucket"
   available_memory_mb   = 256
   source_archive_bucket = google_storage_bucket.gcf_code.name
-  source_archive_object = google_storage_bucket_object.upload_to_gcs_code.name
+  source_archive_object = google_storage_bucket_object.gcf_ingestion_code.name
   timeout               = 120
   entry_point           = "ingest_data"
   runtime               = "python37"
@@ -199,28 +207,14 @@ resource "google_cloudfunctions_function" "data_ingestion_to_gcs" {
  * [BEGIN] GCF GCS to BigQuery Setup
  */
 
-# Create a ZIP of the data_ingestion folder.
-data "archive_file" "gcs_to_bq_zip" {
-  type        = "zip"
-  source_dir  = "${var.gcf_code_path}/gcs_to_bq/"
-  output_path = "${var.gcf_code_path}/gcs_to_bq.zip"
-}
-
-# Place the ZIP file into the gcf_code bucket
-resource "google_storage_bucket_object" "gcs_to_bq_code" {
-  name   = "gcs_to_bq.zip"
-  bucket = google_storage_bucket.gcf_code.name
-  source = data.archive_file.gcs_to_bq_zip.output_path
-}
-
 # Configure Cloud Function for moving data from GCS to BigQuery
 resource "google_cloudfunctions_function" "gcs_to_bq" {
   name                  = var.gcf_gcs_to_bq_name
   description           = "Moves data from GCS bucket to BigQuery"
   available_memory_mb   = 256
   source_archive_bucket = google_storage_bucket.gcf_code.name
-  source_archive_object = google_storage_bucket_object.gcs_to_bq_code.name
-  timeout               = 120
+  source_archive_object = google_storage_bucket_object.gcf_ingestion_code.name
+  timeout               = 500
   entry_point           = "ingest_bucket_to_bq"
   runtime               = "python37"
   event_trigger {
@@ -278,6 +272,45 @@ resource "google_project_iam_member" "ingestion_runner_binding" {
   member  = format("serviceAccount:%s", google_service_account.ingestion_runner_identity.email)
 }
 
+# Service account used to invoke the cloud run service through the push subscription.
+resource "google_service_account" "gcs_to_bq_invoker_identity" {
+  # The account id that is used to generate the service account email. Must be 6-30 characters long and
+  # match the regex [a-z]([-a-z0-9]*[a-z0-9]).
+  account_id = var.gcs_to_bq_invoker_identity_id
+}
+
+# Service account whose identity is used when running the GCS-to-BQ service.
+resource "google_service_account" "gcs_to_bq_runner_identity" {
+  # The account id that is used to generate the service account email. Must be 6-30 characters long and
+  # match the regex [a-z]([-a-z0-9]*[a-z0-9]).
+  account_id = var.gcs_to_bq_runner_identity_id
+}
+
+# Give the GCS-to-BQ invoker service account the existing invoker role so that it can call the GCS-to-BQ service.
+resource "google_cloud_run_service_iam_member" "gcs_to_bq_invoker_binding" {
+  location = var.compute_region
+  service  = google_cloud_run_service.gcs_to_bq_service.name
+  role     = "roles/run.invoker"
+  member   = format("serviceAccount:%s", google_service_account.gcs_to_bq_invoker_identity.email)
+}
+
+# Give the GCS-to-BQ runner service account permissions it needs (e.g. GCS bucket access). Add to the permissions list
+# here if the GCS-to-BQ runner needs access to other GCP resources.
+resource "google_project_iam_custom_role" "gcs_to_bq_runner_role" {
+  role_id     = var.gcs_to_bq_runner_role_id
+  title       = "GCS-to-BQ Runner"
+  description = "Allows reading data from GCS bucket and writing and reading BQ datasets."
+  permissions = ["storage.objects.get", "storage.objects.list", "storage.buckets.get",
+                 "bigquery.datasets.get", "bigquery.tables.create", "bigquery.tables.delete",
+                 "bigquery.tables.get", "bigquery.tables.list", "bigquery.tables.update",
+                 "bigquery.tables.updateData", "bigquery.jobs.create"]
+}
+
+resource "google_project_iam_member" "gcs_to_bq_runner_binding" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.gcs_to_bq_runner_role.id
+  member  = format("serviceAccount:%s", google_service_account.gcs_to_bq_runner_identity.email)
+}
 /* 
  * [END] Service Account Setup 
  */
@@ -286,12 +319,17 @@ resource "google_project_iam_member" "ingestion_runner_binding" {
  * [BEGIN] Cloud Run Setup
  */
 
+# Create a Pub/Sub topic to trigger the GCS-to-BQ service.
+resource "google_pubsub_topic" "notify_data_ingested" {
+  name = var.notify_data_ingested_topic
+}
+
 # Push subscription for upload_to_gcs topic that invokes the run service.
 resource "google_pubsub_subscription" "ingestion_subscription" {
   name  = var.ingestion_subscription_name
   topic = google_pubsub_topic.upload_to_gcs.name
 
-  ack_deadline_seconds = 20
+  ack_deadline_seconds = 60
 
   push_config {
     # Due to Terraform config language restrictions, index the first status element in a list of one.
@@ -311,7 +349,7 @@ resource "google_cloud_run_service" "ingestion_service" {
   template {
     spec {
       containers {
-        image = var.run_ingestion_image_path
+        image = format("gcr.io/%s/%s", var.project_id, var.ingestion_image_name) 
         env {
           name  = "PROJECT_ID"
           value = var.project_id
@@ -332,6 +370,58 @@ resource "google_cloud_run_service" "ingestion_service" {
   autogenerate_revision_name = true
 }
 
+# Push subscription for notify_data_ingested topic that invokes the run service.
+resource "google_pubsub_subscription" "notify_data_ingested_subscription" {
+  name  = var.notify_data_ingested_subscription_name
+  topic = google_pubsub_topic.notify_data_ingested.name
+
+  ack_deadline_seconds = 60
+
+  retry_policy {
+    minimum_backoff = "30s"
+  }
+
+  push_config {
+    # Due to Terraform config language restrictions, index the first status element in a list of one.
+    push_endpoint = google_cloud_run_service.gcs_to_bq_service.status.0.url
+    oidc_token {
+      service_account_email = google_service_account.gcs_to_bq_invoker_identity.email
+    }
+  }
+}
+
+# Cloud Run service for loading GCS buckets into Bigquery.
+resource "google_cloud_run_service" "gcs_to_bq_service" {
+  name     = var.run_gcs_to_bq_service_name
+  location = var.compute_region
+  project  = var.project_id
+
+  template {
+    spec {
+      containers {
+        image = format("gcr.io/%s/%s", var.project_id, var.gcs_to_bq_image_name)
+        env {
+          # Name of BQ dataset that we will add the tables to. This currently points to the main BQ dataset.
+          name  = "DATASET_NAME"
+          value = var.bq_dataset_name
+        }
+
+        resources {
+          limits = {
+            memory = "2G"
+          }
+        }
+      }
+      service_account_name = google_service_account.gcs_to_bq_runner_identity.email
+    }
+  }
+
+  traffic {
+    percent         = 100
+    latest_revision = true
+  }
+  autogenerate_revision_name = true
+}
 /* 
  * [END] Cloud Run Setup
  */
@@ -365,7 +455,7 @@ resource "google_cloud_scheduler_job" "household_income_scheduler" {
 
 # Create a Cloud Scheduler task to trigger the upload_to_gcs Pub/Sub event for state names data
 resource "google_cloud_scheduler_job" "state_names_scheduler" {
-  name        = var.state_names_scheduer_name
+  name        = var.state_names_scheduler_name
   description = "Triggers uploading state names data from the census API to GCS every Thursday at 8:10 ET."
   time_zone   = "America/New_York"
   schedule    = "10 8 * * 5"
@@ -381,6 +471,81 @@ resource "google_cloud_scheduler_job" "state_names_scheduler" {
   }
 }
 
-/*
- * [END] Cloud Scheduler Setup
- */
+# Create a Cloud Scheduler task to trigger the upload_to_gcs Pub/Sub event for county names data
+resource "google_cloud_scheduler_job" "county_names_scheduler" {
+  name        = var.county_names_scheduler_name
+  description = "Triggers uploading county names data from the census API to GCS every Thursday at 8:10 ET."
+  time_zone   = "America/New_York"
+  schedule    = "10 8 * * 5"
+
+  pubsub_target {
+    topic_name = google_pubsub_topic.upload_to_gcs.id
+    data = base64encode(jsonencode({
+      "id" : "COUNTY_NAMES",
+      "url" : "https://api.census.gov/data/2010/dec/sf1",
+      "gcs_bucket" : google_storage_bucket.gcs_data_ingestion_landing_bucket.name,
+      "filename" : "county_names.json"
+    }))
+  }
+}
+
+# Create a Cloud Scheduler task to trigger the upload_to_gcs Pub/Sub event for population by race data
+resource "google_cloud_scheduler_job" "population_by_race_scheduler" {
+  name        = var.population_by_race_scheduler_name
+  description = "Triggers uploading population by race data from the census API to GCS every Thursday at 8:10 ET."
+  time_zone   = "America/New_York"
+  schedule    = "10 8 * * 5"
+
+  pubsub_target {
+    topic_name = google_pubsub_topic.upload_to_gcs.id
+    data = base64encode(jsonencode({
+      "id" : "POPULATION_BY_RACE",
+      # TODO: figure out how to detect the latest year for this data.
+      "url" : "https://api.census.gov/data/2018/acs/acs5/profile",
+      "gcs_bucket" : google_storage_bucket.gcs_data_ingestion_landing_bucket.name,
+      "filename" : "population_by_race.json"
+    }))
+  }
+}
+
+# Create a Cloud Scheduler task to trigger the upload_to_gcs Pub/Sub event for county adjacency data
+resource "google_cloud_scheduler_job" "county_adjacency_scheduler" {
+  name        = var.county_adjacency_scheduler_name
+  description = "Triggers uploading county adjacency data from the census API to GCS every Thursday at 8:10 ET."
+  time_zone   = "America/New_York"
+  schedule    = "10 8 * * 5"
+
+  pubsub_target {
+    topic_name = google_pubsub_topic.upload_to_gcs.id
+    data = base64encode(jsonencode({
+      "id" : "COUNTY_ADJACENCY",
+      # Note: this is from the National Bureau of Economic Research, which is a
+      # private non-profit. The official data comes from the Census Bureau
+      # directly, but the file they published had formatting issues that caused
+      # issues when trying to decode the data from cloud functions. It may be a
+      # good idea to try to migrate to the official source. At the time of
+      # writing the data is identical.
+      "url" : "https://data.nber.org/census/geo/county-adjacency/2010/county_adjacency2010.csv",
+      "gcs_bucket" : google_storage_bucket.gcs_data_ingestion_landing_bucket.name,
+      "filename" : "county_adjacency.csv"
+    }))
+  }
+}
+
+# Create a Cloud Scheduler task to trigger the Pub/Sub event
+resource "google_cloud_scheduler_job" "primary_care_scheduler" {
+  name                    = var.primary_care_access_scheduler_name
+  description             = "Triggers uploading primary care access to GCS every Thursday at 8:10 ET."
+  time_zone               = "America/New_York"
+  schedule                = "10 8 * * 5"
+
+  pubsub_target {
+    topic_name            = google_pubsub_topic.upload_to_gcs.id
+    data                  = base64encode(jsonencode({
+                              "id":"PRIMARY_CARE_ACCESS",
+                              "gcs_bucket": google_storage_bucket.gcs_data_ingestion_landing_bucket.name,
+                              "fileprefix":"primary-care"
+                            }))
+  }
+}
+/* [END] Cloud Scheduler Setup */

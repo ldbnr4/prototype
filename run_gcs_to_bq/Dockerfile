@@ -9,11 +9,11 @@ ENV PYTHONUNBUFFERED True
 # Copy local code to the container image.
 ENV APP_HOME /app
 WORKDIR $APP_HOME
-COPY ./run_ingestion ./run_ingestion
+COPY ./run_gcs_to_bq ./run_gcs_to_bq
 COPY ./python ./python
 
 # Install production dependencies.
-RUN pip install -r run_ingestion/requirements.txt
+RUN pip install -r run_gcs_to_bq/requirements.txt
 # Install shared packages
 RUN pip install ./python/ingestion
 
@@ -21,4 +21,4 @@ RUN pip install ./python/ingestion
 # webserver, with one worker process and 8 threads.
 # For environments with multiple CPU cores, increase the number of workers
 # to be equal to the cores available.
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 --chdir run_ingestion main:app
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 --chdir run_gcs_to_bq main:app

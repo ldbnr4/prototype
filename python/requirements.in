@@ -1,0 +1,4 @@
+# This file only exists for the purposes of deploying the code as a cloud
+# function. It should be cleaned up when we clean up the cloud functions.
+
+-r ingestion/requirements.in

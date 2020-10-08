@@ -6,11 +6,9 @@ app = Flask(__name__)
 
 
 @app.route('/', methods=['POST'])
-def ingest_data():
-  """Main function for data ingestion. Receives Pub/Sub trigger and triages to the
-     appropriate data ingestion workflow.
-     
-     Returns 400 for a bad request or 204 for success."""
+def ingest_bucket_to_bq():
+  """Main function for moving data from buckets to bigquery. Triggered by
+     notify-data-ingested topic."""
   envelope = request.get_json()
   if not envelope:
     logging.error('No Pub/Sub message received.')
@@ -21,10 +19,10 @@ def ingest_data():
     return ('', 400)
 
   event = envelope['message']
-  logging.info(f"message: {event}")
+  logging.info(f"Received message: {event}")
 
   try:
-    util.ingest_data_to_gcs(event)
+    util.ingest_bucket_to_bq(event)
     return ('', 204)
   except Exception as e:
     logging.error(e)
